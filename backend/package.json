@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js",
-    "build-frontend": "cd ../frontend && npm install && npm run build && rm -rf ../backend/public && mkdir -p ../backend/public && cp -r dist/* ../backend/public/",
+    "build-frontend": "cd ../frontend && npm install && rm -rf ../backend/public && npm run build",
     "postinstall": "npm run build-frontend"
   },
   "dependencies": {
