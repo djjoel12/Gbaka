@@ -38,7 +38,7 @@ export default function App() {
       .catch(err => console.error('Erreur:', err));
   }, []);
 
-  // Focus sur la barre de recherche quand on change d'onglet
+  // Focus sur la barre 
   useEffect(() => {
     if (activeTab === 'search' && searchInputRef.current) {
       setTimeout(() => {
