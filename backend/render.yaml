@@ -2,7 +2,7 @@ services:
   - type: web
     name: gbaka-backend
     env: node
-    buildCommand: npm install
+    buildCommand: npm install && npm run build-frontend
     startCommand: npm start
     envVars:
       - key: NODE_ENV
