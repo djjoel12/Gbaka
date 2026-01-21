@@ -2,7 +2,6 @@ import express from 'express';
 import cors from 'cors';
 import axios from 'axios';
 import dotenv from 'dotenv';
-import mongoose from 'mongoose';
 
 // Charger les variables d'environnement
 dotenv.config();
@@ -37,36 +36,40 @@ console.log(`🌍 Mode: ${process.env.NODE_ENV || 'development'}`);
 app.get('/api/mapbox/tiles/:z/:x/:y', async (req, res) => {
   try {
     const { z, x, y } = req.params;
-    const scale = req.query.scale || '@2x';
+    const scale = req.query.scale || '';
+    const retina = scale.includes('@2x') ? '@2x' : '';
     
-    const url = `https://api.mapbox.com/styles/v1/mapbox/streets-v12/tiles/${z}/${x}/${y}${scale}?access_token=${process.env.MAPBOX_TOKEN}`;
+    const url = `https://api.mapbox.com/styles/v1/mapbox/streets-v12/tiles/512/${z}/${x}/${y}${retina}?access_token=${process.env.MAPBOX_TOKEN}`;
     
-    console.log(`🗺️  Tile request: z=${z}, x=${x}, y=${y}`);
+    console.log(`🗺️  Tile: z=${z}, x=${x}, y=${y}`);
     
     const response = await axios.get(url, {
       responseType: 'arraybuffer',
       headers: {
-        'User-Agent': 'Gbaka-Guides/1.0'
+        'User-Agent': 'Gbaka-Guides/1.0',
+        'Accept': 'image/webp,*/*'
       }
     });
     
-    // Définir les headers appropriés
-    res.set('Content-Type', 'image/png');
-    res.set('Cache-Control', 'public, max-age=86400'); // Cache 24h
-    res.set('Access-Control-Allow-Origin', '*');
+    // Définir les headers
+    res.set({
+      'Content-Type': 'image/png',
+      'Cache-Control': 'public, max-age=86400',
+      'Access-Control-Allow-Origin': '*'
+    });
     
     res.send(response.data);
     
   } catch (error) {
-    console.error('❌ Erreur proxy tile:', error.message);
+    console.error('❌ Erreur tile:', error.message);
     res.status(500).json({ 
-      error: 'Erreur lors du chargement de la carte',
-      details: error.message 
+      error: 'Erreur de chargement de la carte',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 });
 
-// Proxy pour le geocoding (recherche d'adresses)
+// Proxy pour le geocoding
 app.get('/api/mapbox/geocoding', async (req, res) => {
   try {
     const { q: query, limit = 5, country = 'ci' } = req.query;
@@ -85,7 +88,7 @@ app.get('/api/mapbox/geocoding', async (req, res) => {
       types: 'poi,address,neighborhood,place'
     };
     
-    console.log(`🔍 Geocoding request: "${query}"`);
+    console.log(`🔍 Geocoding Mapbox: "${query}"`);
     
     const response = await axios.get(url, { params });
     
@@ -97,7 +100,7 @@ app.get('/api/mapbox/geocoding', async (req, res) => {
     });
     
   } catch (error) {
-    console.error('❌ Erreur geocoding:', error.message);
+    console.error('❌ Erreur geocoding Mapbox:', error.message);
     res.status(500).json({ 
       error: 'Erreur lors de la recherche',
       details: error.message 
@@ -105,7 +108,114 @@ app.get('/api/mapbox/geocoding', async (req, res) => {
   }
 });
 
-// Proxy pour les directions (itinéraires)
+// RECHERCHE AVEC OPENSTREETMAP (Nominatim) - MEILLEUR POUR LES NOMS LOCAUX
+app.get('/api/search/places', async (req, res) => {
+  try {
+    const { q: query, limit = 5 } = req.query;
+    
+    if (!query) {
+      return res.status(400).json({ error: 'Paramètre "q" requis' });
+    }
+    
+    // URL de l'API OpenStreetMap Nominatim
+    const url = 'https://nominatim.openstreetmap.org/search';
+    
+    // Paramètres optimisés pour Abidjan
+    const params = {
+      q: query + ' Abidjan', // On force la recherche à Abidjan
+      format: 'json',
+      limit: limit,
+      countrycodes: 'ci', // Côte d'Ivoire
+      'accept-language': 'fr',
+      viewbox: '-4.2,5.1,-3.9,5.5', // Zone autour d'Abidjan
+      bounded: 1, // Seulement dans la zone
+      addressdetails: 1 // Détails d'adresse
+    };
+    
+    console.log(`🔍 OSM Search: "${query}"`);
+    
+    const response = await axios.get(url, { 
+      params,
+      headers: {
+        'User-Agent': 'Gbaka-Guides-App/1.0 (gbaka-transport-app)'
+      }
+    });
+    
+    // Formater les résultats comme Mapbox (pour compatibilité)
+    const formattedResults = response.data.map(place => {
+      // Extraire le nom le plus simple
+      let displayName = place.display_name;
+      if (displayName.includes(',')) {
+        displayName = displayName.split(',')[0]; // Premier élément
+      }
+      
+      // Vérifier si c'est dans Abidjan
+      const isInAbidjan = place.display_name.toLowerCase().includes('abidjan') || 
+                         place.display_name.toLowerCase().includes('abj');
+      
+      return {
+        id: place.place_id,
+        type: 'Feature',
+        place_type: [place.type || 'place'],
+        relevance: isInAbidjan ? 1 : 0.5, // Priorité à Abidjan
+        text: displayName,
+        place_name: place.display_name,
+        center: [parseFloat(place.lon), parseFloat(place.lat)],
+        geometry: {
+          type: 'Point',
+          coordinates: [parseFloat(place.lon), parseFloat(place.lat)]
+        },
+        properties: {
+          category: place.type,
+          importance: place.importance
+        }
+      };
+    });
+    
+    // Trier par pertinence (Abidjan d'abord)
+    formattedResults.sort((a, b) => b.relevance - a.relevance);
+    
+    res.json({
+      success: true,
+      query: query,
+      results: formattedResults,
+      attribution: "© OpenStreetMap contributors"
+    });
+    
+  } catch (error) {
+    console.error('❌ Erreur recherche OSM:', error.message);
+    
+    // Fallback: essayer Mapbox si OSM échoue
+    try {
+      const mapboxUrl = `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(req.query.q)}.json`;
+      const mapboxResponse = await axios.get(mapboxUrl, {
+        params: {
+          access_token: process.env.MAPBOX_TOKEN,
+          country: 'CI',
+          limit: 5,
+          language: 'fr'
+        }
+      });
+      
+      res.json({
+        success: true,
+        query: req.query.q,
+        results: mapboxResponse.data.features,
+        attribution: "© Mapbox © OpenStreetMap",
+        source: 'mapbox_fallback'
+      });
+      
+    } catch (fallbackError) {
+      res.status(500).json({ 
+        success: false,
+        error: 'Erreur de recherche',
+        details: error.message 
+      });
+    }
+  }
+});
+
+// Proxy pour les directions AVEC ÉTAPES DÉTAILLÉES
 app.get('/api/mapbox/directions', async (req, res) => {
   try {
     const { from, to, profile = 'driving' } = req.query;
@@ -120,69 +230,99 @@ app.get('/api/mapbox/directions', async (req, res) => {
     
     const params = {
       access_token: process.env.MAPBOX_TOKEN,
-      alternatives: true,
+      alternatives: false,
       geometries: 'geojson',
       overview: 'full',
-      steps: true,
-      language: 'fr'
+      steps: true, // IMPORTANT: pour avoir les étapes détaillées
+      language: 'fr',
+      voice_instructions: false,
+      banner_instructions: false
     };
     
-    console.log(`🧭 Directions: ${from} → ${to} (${profile})`);
+    console.log(`🧭 Directions: ${from} → ${to}`);
     
     const response = await axios.get(url, { params });
     
-    res.json({
-      success: true,
-      route: response.data.routes[0],
-      alternatives: response.data.routes.slice(1),
-      waypoints: response.data.waypoints
-    });
+    if (response.data.routes && response.data.routes.length > 0) {
+      const route = response.data.routes[0];
+      const legs = route.legs[0];
+      
+      // Formatter les étapes pour le frontend
+      const formattedSteps = legs.steps.map((step, index) => ({
+        number: index + 1,
+        instruction: step.maneuver.instruction,
+        distance: (step.distance / 1000).toFixed(1) + ' km',
+        duration: Math.round(step.duration / 60) + ' min',
+        maneuver: step.maneuver.type,
+        modifier: step.maneuver.modifier
+      }));
+      
+      res.json({
+        success: true,
+        route: {
+          distance: route.distance,
+          duration: route.duration,
+          geometry: route.geometry
+        },
+        legs: [{
+          summary: legs.summary,
+          steps: formattedSteps,
+          distance: legs.distance,
+          duration: legs.duration
+        }],
+        waypoints: response.data.waypoints,
+        fullRoute: route // Pour debug
+      });
+      
+    } else {
+      res.status(404).json({
+        success: false,
+        error: 'Aucun itinéraire trouvé'
+      });
+    }
     
   } catch (error) {
     console.error('❌ Erreur directions:', error.message);
     res.status(500).json({ 
+      success: false,
       error: 'Erreur lors du calcul d\'itinéraire',
       details: error.message 
     });
   }
 });
 
-// Proxy pour le style de carte
-app.get('/api/mapbox/style', async (req, res) => {
+// Proxy pour OpenStreetMap tiles
+app.get('/api/osm/tiles/:z/:x/:y', async (req, res) => {
   try {
-    const style = req.query.style || 'streets-v12';
+    const { z, x, y } = req.params;
     
-    const url = `https://api.mapbox.com/styles/v1/mapbox/${style}`;
+    const url = `https://tile.openstreetmap.org/${z}/${x}/${y}.png`;
     
     const response = await axios.get(url, {
-      params: {
-        access_token: process.env.MAPBOX_TOKEN
+      responseType: 'arraybuffer',
+      headers: {
+        'User-Agent': 'Gbaka-Guides/1.0'
       }
     });
     
-    // Remplacer les URLs par nos URLs proxy
-    const styleData = response.data;
-    if (styleData.sources) {
-      // Remplacer les sources vectorielles
-      Object.keys(styleData.sources).forEach(sourceKey => {
-        const source = styleData.sources[sourceKey];
-        if (source.url && source.url.includes('mapbox://')) {
-          // Convertir en URL proxy
-          source.url = source.url.replace('mapbox://', '/api/mapbox/tiles/');
-        }
-      });
-    }
+    res.set({
+      'Content-Type': 'image/png',
+      'Cache-Control': 'public, max-age=86400',
+      'Access-Control-Allow-Origin': '*'
+    });
     
-    res.json(styleData);
+    res.send(response.data);
     
   } catch (error) {
-    console.error('❌ Erreur style:', error.message);
-    res.status(500).json({ error: 'Erreur lors du chargement du style' });
+    console.error('❌ Erreur OSM tile:', error.message);
+    res.status(500).json({ 
+      error: 'Erreur de chargement de la carte OSM'
+    });
   }
 });
 
 // ============================================
-// ROUTES GBAKA (tes données)
+// ROUTES GBAKA
 // ============================================
 
 // Points d'intérêt Gbaka
@@ -192,33 +332,60 @@ const gbakaPoints = [
     name: "Gare Gbaka Yopougon",
     type: "gbaka",
     coordinates: [-4.065, 5.335],
-    description: "Gare principale de Yopougon",
+    description: "Gare principale de Yopougon - Départ toutes les 5 min",
     price: 300,
     frequency: "5min",
     icon: "🚌",
-    color: "#f97316"
+    color: "#f97316",
+    routes: ["Plateau", "Cocody", "Marcory"]
   },
   {
     id: 2,
     name: "Arrêt Wôrô-wôrô Cocody",
     type: "woroworo", 
     coordinates: [-4.055, 5.345],
-    description: "Arrêt taxi partagé",
+    description: "Arrêt taxi partagé - Riviera Golf",
     price: 400,
     frequency: "2min",
     icon: "🚖",
-    color: "#3b82f6"
+    color: "#3b82f6",
+    routes: ["Plateau", "Marcory", "Treichville"]
   },
   {
     id: 3,
     name: "Gare Plateau",
     type: "gbaka",
     coordinates: [-4.025, 5.325],
-    description: "Terminus Plateau",
+    description: "Terminus Plateau - Rue du Commerce",
     price: 300,
     frequency: "10min",
     icon: "🚌",
-    color: "#f97316"
+    color: "#f97316",
+    routes: ["Yopougon", "Cocody", "Adjamé"]
+  },
+  {
+    id: 4,
+    name: "Station Adjamé",
+    type: "gbaka",
+    coordinates: [-4.035, 5.355],
+    description: "Grande station - Toutes destinations",
+    price: 250,
+    frequency: "3min",
+    icon: "🚌",
+    color: "#10b981",
+    routes: ["Yopougon", "Plateau", "Cocody", "Marcory", "Treichville"]
+  },
+  {
+    id: 5,
+    name: "Arrêt Marcory",
+    type: "woroworo",
+    coordinates: [-4.015, 5.315],
+    description: "Marché Marcory - Taxis vers Plateau",
+    price: 350,
+    frequency: "5min",
+    icon: "🚖",
+    color: "#8b5cf6",
+    routes: ["Plateau", "Cocody", "Treichville"]
   }
 ];
 
@@ -231,85 +398,36 @@ app.get('/api/gbaka/points', (req, res) => {
   });
 });
 
-// Rechercher des points par type
-app.get('/api/gbaka/points/:type', (req, res) => {
-  const { type } = req.params;
-  const filtered = gbakaPoints.filter(point => point.type === type);
-  
-  res.json({
-    success: true,
-    type: type,
-    count: filtered.length,
-    points: filtered
-  });
-});
-
-// Itinéraires populaires
-app.get('/api/gbaka/routes/popular', (req, res) => {
-  const popularRoutes = [
-    {
-      id: 1,
-      from: "Yopougon",
-      to: "Plateau",
-      price: 300,
-      duration: 42,
-      distance: 12,
-      steps: [
-        "Trouver la gare Gbaka Yopougon",
-        "Prendre le gbaka orange/bleu",
-        "Payer 300 FCFA",
-        "Descendre au terminus Plateau"
-      ],
-      popularity: 95
-    },
-    {
-      id: 2,
-      from: "Cocody",
-      to: "Marcory", 
-      price: 400,
-      duration: 35,
-      distance: 8,
-      steps: [
-        "Aller à l'arrêt Cocody Riviera",
-        "Prendre le woroworo jaune",
-        "Payer 400 FCFA",
-        "Dire 'Marcory marché' au chauffeur"
-      ],
-      popularity: 87
-    }
-  ];
-  
-  res.json({
-    success: true,
-    routes: popularRoutes
-  });
-});
-
-// ============================================
-// ROUTES UTILISATEUR & AUTH (pour plus tard)
-// ============================================
-
-// Route test
+// Route santé
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'healthy',
     service: 'Gbaka Guides API',
     version: '1.0.0',
     timestamp: new Date().toISOString(),
-    mapbox: process.env.MAPBOX_TOKEN ? 'configured' : 'missing'
+    mapbox: process.env.MAPBOX_TOKEN ? 'configured' : 'missing',
+    endpoints: [
+      'GET /api/health',
+      'GET /api/mapbox/geocoding?q=...',
+      'GET /api/mapbox/directions?from=...&to=...',
+      'GET /api/search/places?q=... (OSM)',
+      'GET /api/osm/tiles/{z}/{x}/{y}',
+      'GET /api/gbaka/points'
+    ]
   });
 });
 
-// Route 404
+// Route 404 pour API
 app.use('/api/*', (req, res) => {
   res.status(404).json({
-    error: 'Route non trouvée',
+    error: 'Route API non trouvée',
     availableRoutes: [
       'GET /api/health',
       'GET /api/mapbox/geocoding?q=...',
       'GET /api/mapbox/directions?from=...&to=...',
-      'GET /api/gbaka/points',
-      'GET /api/gbaka/routes/popular'
+      'GET /api/search/places?q=... (OSM)',
+      'GET /api/osm/tiles/{z}/{x}/{y}',
+      'GET /api/gbaka/points'
     ]
   });
 });
@@ -324,11 +442,14 @@ app.listen(PORT, () => {
   
   📍 Port: ${PORT}
   🌐 Mode: ${process.env.NODE_ENV || 'development'}
-  🗺️  Mapbox: ${process.env.MAPBOX_TOKEN ? '✅ Configuré' : '❌ Manquant'}
+  🗺️  Mapbox: ✅ Configuré
+  🗺️  OSM: ✅ Configuré
   
   📡 Routes disponibles:
      http://localhost:${PORT}/api/health
      http://localhost:${PORT}/api/mapbox/geocoding?q=Plateau
+     http://localhost:${PORT}/api/search/places?q=Plateau
+     http://localhost:${PORT}/api/mapbox/directions?from=-4.05,5.32&to=-4.02,5.33
      http://localhost:${PORT}/api/gbaka/points
   
   ⚡ Frontend: http://localhost:5173
