@@ -2,12 +2,13 @@ services:
   - type: web
     name: gbaka-backend
     env: node
+    root: backend
     buildCommand: npm install && npm run build-frontend
     startCommand: npm start
     envVars:
       - key: NODE_ENV
         value: production
       - key: MAPBOX_TOKEN
-        sync: false  # Tu dois l'ajouter manuellement dans Render
+        sync: false  # Ajoute ton token Mapbox manuellement dans Render
     autoDeploy: true
     healthCheckPath: /api/health
